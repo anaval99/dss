@@ -144,18 +144,71 @@ All schedules carry an **optional `TimeOfDay? time`** (null = all-day).
 | `MonthlyByDay` | `int dayOfMonth` (1–31), `TimeOfDay? time` | "Every 1st", "Every 31st" |
 | `MonthlyByWeekday` | `int ordinal` (1–5), `int weekday` (1–7), `TimeOfDay? time` | "Every 3rd Friday" |
 
-### Recurrence engine — `nextOccurrence(schedule, from: today)`
-Returns the **first occurrence on or after `today`** (date granularity; today counts).
+#### Invariants & defensive handling
+These are enforced at construction **and** the persistence boundary must tolerate violations from
+malformed stored rows (a single bad row must **never** throw and take down the whole list render):
 
-- **OneTime** → returns its `date` regardless (may be in the past → overdue). Recurring never returns past.
-- **Weekly** → nearest of the chosen weekdays ≥ today. *(today is Tue, rule = Wed ⇒ this coming Wed; rule = Tue ⇒ today.)*
-- **MonthlyByDay** → this month's `min(dayOfMonth, lastDayOfMonth)` if ≥ today, else next month's (clamped). *(31st in Feb ⇒ 28th/29th.)*
-- **MonthlyByWeekday** → the nth weekday this month; if that month has fewer (e.g. no 5th Friday) **clamp to the last** matching weekday; if it's already past, roll to next month.
+- **`Weekly.weekdays` is non-empty**, each value in `1..7`. Editor blocks save on an empty set
+  (mirrors "empty title blocked"). An empty/invalid stored set ⇒ row is **skipped-and-logged**, not thrown.
+- **`MonthlyByDay.dayOfMonth`** is clamped to `1..31` *on read* (`dayOfMonth.clamp(1, 31)`), then
+  clamped again to the target month's last day during occurrence computation. (Guards `DateTime(y,m,0)`,
+  which silently rolls to the previous month.)
+- **`MonthlyByWeekday.ordinal`** in `1..5`, **`weekday`** in `1..7`; out-of-range ⇒ skip-and-logged.
+- **Unknown schedule discriminator** (e.g. a type written by a future schema) ⇒ skip-and-logged, never throw.
+- The repository mapping returns a `List<Event>` of only the **valid** rows; invalid rows are dropped
+  with a logged warning so the list keeps rendering. (A "corrupt event" tile is a post-v1 nicety.)
 
-> **Clamp rule (global):** whenever a requested day doesn't exist in a month, use the **last valid** day/weekday of that month rather than skipping.
+### Recurrence engine — `nextOccurrence(schedule, from) -> DateTime?`
+Returns the **first occurrence whose *date* is on or after `from`** (today counts). Both `from` and the
+returned value are normalized to **date-only** (midnight, local) for all comparisons — the engine works
+purely in calendar dates. Time-of-day is **not** part of occurrence selection in v1; it is carried
+separately for display only (and never moves an occurrence to the next day). Returns `null` only for an
+invalid/empty schedule that slipped past validation (caller skips it).
+
+> **Normative comparison rule:** all date comparisons use **date-only** values
+> (`d = DateUtils.dateOnly(x)`). Never compare or subtract raw `DateTime`s with a time component.
+
+**Global ordered algorithm for the monthly variants** (this exact order is mandatory — a naive
+"compare the raw requested day, then clamp" ordering would wrongly skip an occurrence):
+
+```
+nextMonthlyOccurrence(from):
+  cursor = first-of-month(from)
+  loop:                                 # bounded; resolves within at most a few iterations
+    candidate = resolveInMonth(cursor)  # CLAMP happens here, inside the month
+    if dateOnly(candidate) >= dateOnly(from):
+        return candidate
+    cursor = cursor + 1 month           # roll forward
+    # loop re-runs resolveInMonth → RE-CLAMPS in the new month
+```
+The key invariants: **clamp first (inside the month) → then compare to `from` → only then roll → then
+re-clamp.** Each `resolveInMonth` is self-contained and always re-clamps; "roll to next month" never
+carries a clamped day across the boundary.
+
+Per-variant `resolveInMonth` / selection:
+
+- **OneTime** → returns its `date` verbatim (may be in the past → overdue). Recurring never returns past.
+- **Weekly** → smallest date `≥ from` whose weekday ∈ `weekdays` (scan the next 7 days from `from`).
+  *(today Tue, rule Wed ⇒ this coming Wed; rule Tue ⇒ today.)* Requires `weekdays` non-empty (invariant).
+- **MonthlyByDay** → `day = min(dayOfMonth.clamp(1,31), lastDayOfMonth(cursor))`; candidate =
+  `DateTime(cursor.year, cursor.month, day)`. *(31st in Feb ⇒ 28th/29th.)*
+- **MonthlyByWeekday** → the `ordinal`-th `weekday` in `cursor`'s month; if the month has fewer
+  (e.g. no 5th Friday) **clamp to the last** matching weekday in that month. Then apply the ordered
+  algorithm (compare, roll, **re-clamp** next month).
+
+> **Clamp rule (global):** whenever a requested day/weekday-ordinal doesn't exist in a month, use the
+> **last valid** one in that month rather than skipping — applied *inside each month*, before comparison.
 
 ### Urgency classifier — `classify(occurrenceDate, today)`
-Computed from **whole-day** difference `d = occurrenceDate - today`:
+`d` is a **calendar-day count**, computed on **date-only** values — *not* `Duration.inDays`:
+
+```
+d = dateOnly(occurrenceDate).difference(dateOnly(today)).inDays
+```
+> ⚠️ **Must not** use `occurrence.difference(today).inDays` on raw timestamps: `inDays` truncates toward
+> zero, so a 23:30 occurrence vs midnight `today` yields `0`, an off-by-one across the day boundary.
+> Normalizing both to midnight first makes the delta a true calendar-day difference. This boundary case
+> has a dedicated test (see §10).
 
 | Condition | Urgency | Color |
 |-----------|---------|-------|
@@ -166,6 +219,50 @@ Computed from **whole-day** difference `d = occurrenceDate - today`:
 
 Color is **always derived, never stored.** Time-of-day does not change the color (a thing due later
 today is still "today/red").
+
+### Sort comparator — total & deterministic
+`List.sort` in Dart is **not stable**, so equal-key rows would reorder/flicker on every stream re-emit.
+The resolved list uses a **total comparator** with a final unique tiebreaker:
+
+```
+compareBy(
+  1. dateOnly(occurrence)        ascending   # soonest/overdue first
+  2. isAllDay ? 0 : 1            ascending   # all-day before timed, same date
+  3. time (minutes from midnight) ascending  # earlier time first (timed only)
+  4. id                           ascending   # unique final tiebreaker → deterministic
+)
+```
+Because overdue one-time events carry past dates, key #1 naturally clusters them at the very top
+(most-overdue first). Same-datetime events keep a stable, repeatable order via `id`.
+
+### Persistence schema (Drift) — `schemaVersion = 1`
+The sealed `EventSchedule` (variants with disjoint fields) maps to **one flat table** via a
+**discriminator column + nullable per-variant columns**. Computed occurrences are never stored.
+
+`Events` table:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `INTEGER` PK AUTOINCREMENT | unique, stable; used as the sort tiebreaker |
+| `title` | `TEXT NOT NULL` | non-empty (validated above the DB) |
+| `notes` | `TEXT NULL` | optional |
+| `scheduleType` | `TEXT NOT NULL` | discriminator: `oneTime` \| `weekly` \| `monthlyByDay` \| `monthlyByWeekday` |
+| `date` | `INTEGER (epoch millis) NULL` | `OneTime` only |
+| `weekdaysMask` | `INTEGER NULL` | `Weekly` only — **7-bit mask**, bit `n` = weekday `n+1` (Mon=bit0…Sun=bit6) |
+| `dayOfMonth` | `INTEGER NULL` | `MonthlyByDay` only (1–31) |
+| `ordinal` | `INTEGER NULL` | `MonthlyByWeekday` only (1–5) |
+| `weekday` | `INTEGER NULL` | `MonthlyByWeekday` only (1–7) |
+| `timeMinutes` | `INTEGER NULL` | optional time-of-day = minutes from midnight; `NULL` = all-day |
+| `createdAt` | `INTEGER (epoch millis) NOT NULL` | |
+| `updatedAt` | `INTEGER (epoch millis) NOT NULL` | |
+
+- **`Set<int> weekdays` serialization:** chosen as a **7-bit integer bitmask** (compact, indexable,
+  trivially round-trippable) rather than CSV/JSON. The repository converts mask ⇄ `Set<int>` and
+  treats `0`/`NULL` as invalid (→ skip-and-log).
+- **Migrations:** start at `schemaVersion = 1` with a documented `MigrationStrategy`; every future
+  column/variant change bumps the version with an explicit migration step (Drift-checked).
+- **Repository mapping is total and non-throwing** (per the invariants above): unknown `scheduleType`
+  or out-of-range variant fields drop the row with a logged warning.
 
 ---
 
@@ -201,14 +298,25 @@ production-grade (not generic). Guiding direction:
 
 ## 7. Edge cases & rules (locked)
 
-- **Month clamping:** 31st → last day of short months; 5th weekday → last such weekday.
+- **Month clamping:** 31st → last day of short months; 5th weekday → last such weekday. Applied
+  *inside each month, before the ≥ comparison*, with **re-clamp after rolling** to the next month
+  (see the ordered algorithm in §5).
 - **Weekly "today counts":** if today matches the rule's weekday, the nearest occurrence is **today** (red).
-- **All-day events** (no time) sort before timed events on the same date; render without a time.
-- **"Today" boundary** is local **midnight**; the app recomputes urgency on resume and at day rollover
-  (`todayProvider` invalidates so colors stay correct without a restart).
+- **Date-only comparisons everywhere:** the engine and classifier normalize to midnight; never subtract
+  raw timestamps (`Duration.inDays` truncation bug — see §5 classifier).
+- **Sorting is total & deterministic:** `(dateOnly, all-day-first, time, id)` with `id` as a unique
+  tiebreaker; results are stable across stream re-emits (no row flicker). See §5 comparator.
+- **Malformed / unknown stored rows** are **skipped-and-logged** by the repository — a single bad row
+  never throws or blanks the list (invariants in §5).
+- **"Today" boundary & day rollover (concrete mechanism):** `today` is local **midnight**. A top-level
+  `WidgetsBindingObserver` recomputes `today` on **`AppLifecycleState.resumed`** — this is the reliable
+  path (an in-process midnight `Timer` is **not** dependable on Android due to Doze/app suspension).
+  Optionally, while the app is foregrounded, a `Timer` set to the next local midnight invalidates
+  `todayProvider` so an app left open overnight refreshes its colors without a restart. On invalidation,
+  the derived list re-resolves occurrences and re-classifies.
 - **Overdue** applies only to one-time events (recurring always have a future occurrence).
 - **Local time only** — wall-clock times; no timezone conversion in v1 (revisit with notifications).
-- **Empty title** blocked at save.
+- **Empty title** blocked at save; **Weekly requires ≥1 weekday** selected before save.
 
 ---
 
@@ -219,8 +327,8 @@ production-grade (not generic). Guiding direction:
 
 | Phase | Deliverable | Key tests |
 |-------|-------------|-----------|
-| **1. Domain core** | `Event`, sealed `EventSchedule`, `recurrence_engine`, `urgency_classifier` — pure Dart | **Extensive unit tests** for every recurrence variant + clamp + boundary days; classifier truth table |
-| **2. Persistence** | Drift DB, `Events` table, `EventRepository` CRUD, row↔domain mapping | Repo CRUD tests on in-memory DB; round-trip of every schedule variant |
+| **1. Domain core** | `Event`, sealed `EventSchedule` (+ invariants), `recurrence_engine` (ordered algorithm), `urgency_classifier` (date-only delta), sort comparator — pure Dart. **Decide the `weekdaysMask` serialization + table column layout here** (so Phase 2 has a spec, not a gap). | **Extensive unit tests**: every recurrence variant, clamp, roll-then-re-clamp, classifier boundary, sort stability |
+| **2. Persistence** | Drift DB (`schemaVersion=1`), `Events` table, `EventRepository` CRUD, **total non-throwing** row↔domain mapping | Repo CRUD on in-memory DB; round-trip every variant (mask ⇄ set); malformed-row tolerance |
 | **3. State layer** | Riverpod providers; `eventListProvider` (resolve → sort → classify); `todayProvider` | Provider tests with fake repo/clock |
 | **4. List screen** | Home screen, `EventTile` with urgency styling, FAB, empty state | Widget test: ordering + colors render |
 | **5. Editor + wheel pickers** | Create flow for all types; date/time/AM-PM/day/weekday/ordinal wheels; live "Next:" preview | Widget tests for each picker; create→appears-in-list |
@@ -256,9 +364,20 @@ build_runner            # codegen runner
 
 - **Unit (heaviest):** recurrence engine + urgency classifier are the correctness-critical core —
   table-driven tests across weekdays, month lengths, leap years, clamps, and the today-boundary.
-- **Repository:** Drift in-memory DB, full CRUD + schedule round-trips.
-- **Provider:** injected fake clock (`todayProvider`) + fake repo to assert ordering/colors deterministically.
-- **Widget:** list ordering/colors, each wheel picker, create/edit/delete flows.
+  Mandatory cases:
+  - **Clamp + ordering:** "31st" in Feb (28/29) and Apr (30); "5th Friday" in a 4-Friday month →
+    last Friday; **roll-then-re-clamp** (e.g. today late-month, no occurrence this month → next month
+    re-clamped, *not* the month after).
+  - **Weekly "today counts":** rule weekday == today ⇒ today; multi-weekday picks the nearest.
+  - **Classifier day-boundary:** `23:30 today` vs `00:00 tomorrow` ⇒ `d == 1` (regression guard for the
+    `Duration.inDays` truncation bug); `d` values at −1, 0, 1, 6, 7.
+- **Repository:** Drift in-memory DB, full CRUD + **round-trip of every schedule variant** (incl. the
+  `weekdaysMask` ⇄ `Set<int>` conversion). **Malformed-row tolerance:** unknown `scheduleType`, empty
+  `weekdaysMask`, out-of-range `dayOfMonth`/`ordinal` ⇒ row dropped, list still returns the valid rows.
+- **Provider:** injected fake clock (`todayProvider`) + fake repo to assert ordering/colors deterministically,
+  including **sort stability** (two events with identical date+time keep a fixed order across re-emits via `id`).
+- **Widget:** list ordering/colors, each wheel picker, create/edit/delete flows; **Weekly save blocked**
+  with zero weekdays.
 - A fixed **injectable "today"** (no direct `DateTime.now()` in domain) keeps every date test deterministic.
 
 ---
