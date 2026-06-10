@@ -5,6 +5,7 @@ import 'dart:async';
 
 import 'package:dss/data/repositories/event_repository.dart';
 import 'package:dss/domain/models/event.dart';
+import 'package:dss/domain/models/schedule.dart';
 import 'package:dss/presentation/providers/repository_providers.dart';
 import 'package:dss/presentation/providers/today_provider.dart';
 import 'package:dss/presentation/screens/event_list_screen.dart';
@@ -19,9 +20,18 @@ final _today = DateTime(2026, 6, 9); // Tuesday
 /// In-memory repository fake — avoids Drift's stream-query timer in widget
 /// tests. Only the methods the UI uses are implemented.
 class _FakeRepo implements EventRepository {
+  _FakeRepo({List<Event> seed = const []}) {
+    for (final e in seed) {
+      _events.add(e);
+      if ((e.id ?? 0) >= _nextId) _nextId = e.id! + 1;
+    }
+  }
+
   final List<Event> _events = [];
   final _controller = StreamController<List<Event>>.broadcast();
   int _nextId = 1;
+
+  void _emit() => _controller.add(List.unmodifiable(_events));
 
   @override
   Stream<List<Event>> watchAll() async* {
@@ -31,9 +41,9 @@ class _FakeRepo implements EventRepository {
 
   @override
   Future<int> add(Event event) async {
-    final id = _nextId++;
+    final id = event.id ?? _nextId++;
     _events.add(event.copyWith(id: id));
-    _controller.add(List.unmodifiable(_events));
+    _emit();
     return id;
   }
 
@@ -41,22 +51,28 @@ class _FakeRepo implements EventRepository {
   Future<List<Event>> getAll() async => List.unmodifiable(_events);
 
   @override
-  Future<bool> update(Event event) async => true;
+  Future<bool> update(Event event) async {
+    final i = _events.indexWhere((e) => e.id == event.id);
+    if (i == -1) return false;
+    _events[i] = event;
+    _emit();
+    return true;
+  }
 
   @override
   Future<int> deleteById(int id) async {
     _events.removeWhere((e) => e.id == id);
-    _controller.add(List.unmodifiable(_events));
+    _emit();
     return 1;
   }
 }
 
-Future<void> _pumpApp(WidgetTester tester) async {
+Future<void> _pumpApp(WidgetTester tester, {_FakeRepo? repo}) async {
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
         clockProvider.overrideWithValue(() => _today),
-        eventRepositoryProvider.overrideWithValue(_FakeRepo()),
+        eventRepositoryProvider.overrideWithValue(repo ?? _FakeRepo()),
       ],
       child: const MaterialApp(home: EventListScreen()),
     ),
@@ -135,5 +151,74 @@ void main() {
       find.widgetWithText(FilledButton, 'Save'),
     );
     expect(save.onPressed, isNull);
+  });
+
+  testWidgets('tapping a row opens a prefilled editor; edit persists',
+      (tester) async {
+    final seeded = Event(
+      id: 1,
+      title: 'Original',
+      schedule: OneTime(date: DateTime(2026, 6, 20)),
+      createdAt: _today,
+      updatedAt: _today,
+    );
+    await _pumpApp(tester, repo: _FakeRepo(seed: [seeded]));
+
+    await tester.tap(find.text('Original'));
+    await tester.pumpAndSettle();
+    // Editor is prefilled.
+    expect(find.text('Edit event'), findsOneWidget);
+    expect(find.text('Original'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField).first, 'Renamed');
+    await tester.pump();
+    await _tapSave(tester);
+
+    expect(find.text('Renamed'), findsOneWidget);
+    expect(find.text('Original'), findsNothing);
+    expect(find.byType(EventTile), findsOneWidget); // edited in place, not added
+  });
+
+  testWidgets('swipe deletes a row; undo restores it', (tester) async {
+    final seeded = Event(
+      id: 1,
+      title: 'Disposable',
+      schedule: OneTime(date: DateTime(2026, 6, 20)),
+      createdAt: _today,
+      updatedAt: _today,
+    );
+    await _pumpApp(tester, repo: _FakeRepo(seed: [seeded]));
+    expect(find.byType(EventTile), findsOneWidget);
+
+    await tester.drag(find.text('Disposable'), const Offset(-500, 0));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(EventTile), findsNothing);
+    expect(find.text('Undo'), findsOneWidget);
+
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(EventTile), findsOneWidget);
+    expect(find.text('Disposable'), findsOneWidget);
+  });
+
+  testWidgets('delete from the editor removes the event', (tester) async {
+    final seeded = Event(
+      id: 1,
+      title: 'ToDelete',
+      schedule: OneTime(date: DateTime(2026, 6, 20)),
+      createdAt: _today,
+      updatedAt: _today,
+    );
+    await _pumpApp(tester, repo: _FakeRepo(seed: [seeded]));
+
+    await tester.tap(find.text('ToDelete'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Delete'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(EmptyState), findsOneWidget);
+    expect(find.text('Undo'), findsOneWidget); // editor delete also offers undo
   });
 }

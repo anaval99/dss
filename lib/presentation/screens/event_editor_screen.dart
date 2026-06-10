@@ -16,6 +16,15 @@ enum _EventType { oneTime, recurring }
 
 enum _RecurringKind { weekly, monthlyByDay, monthlyByWeekday }
 
+/// Returned to the list when the editor pops, so the caller can react (e.g.
+/// offer undo). `null` from a plain save/back means "no special action".
+class EditorResult {
+  const EditorResult.deleted(this.event);
+
+  /// The event that was deleted (for undo).
+  final Event event;
+}
+
 const _weekdayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 /// Create form for all event types, using wheel "scroller" inputs and a live
@@ -53,10 +62,47 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
   void initState() {
     super.initState();
     final today = ref.read(todayProvider);
+    // Defaults for a new event (also the fallback for fields a given schedule
+    // variant doesn't carry, so switching type/kind starts from sane values).
     _date = today;
     _weekdays = {today.weekday};
     _dayOfMonth = today.day;
     _monthlyWeekday = today.weekday;
+
+    final event = widget.event;
+    if (event != null) _prefill(event);
+  }
+
+  /// Decomposes an existing event back into the editable form state.
+  void _prefill(Event event) {
+    _titleController.text = event.title;
+    _notesController.text = event.notes ?? '';
+
+    final schedule = event.schedule;
+    final time = schedule.time;
+    if (time != null) {
+      _includeTime = true;
+      _time = time;
+    }
+
+    switch (schedule) {
+      case OneTime(:final date):
+        _type = _EventType.oneTime;
+        _date = date;
+      case Weekly(:final weekdays):
+        _type = _EventType.recurring;
+        _kind = _RecurringKind.weekly;
+        _weekdays = {...weekdays};
+      case MonthlyByDay(:final dayOfMonth):
+        _type = _EventType.recurring;
+        _kind = _RecurringKind.monthlyByDay;
+        _dayOfMonth = dayOfMonth;
+      case MonthlyByWeekday(:final ordinal, :final weekday):
+        _type = _EventType.recurring;
+        _kind = _RecurringKind.monthlyByWeekday;
+        _ordinal = ordinal;
+        _monthlyWeekday = weekday;
+    }
   }
 
   @override
@@ -96,16 +142,41 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     final schedule = _buildSchedule();
     if (_titleController.text.trim().isEmpty || schedule == null) return;
 
+    final repo = ref.read(eventRepositoryProvider);
     final now = ref.read(clockProvider)();
     final notes = _notesController.text.trim();
-    await ref.read(eventRepositoryProvider).add(Event(
-          title: _titleController.text.trim(),
-          notes: notes.isEmpty ? null : notes,
-          schedule: schedule,
-          createdAt: now,
-          updatedAt: now,
-        ));
+    final existing = widget.event;
+
+    if (existing?.id != null) {
+      // Edit: keep id and createdAt; explicit construction so clearing notes
+      // persists as null (copyWith can't set a field back to null).
+      await repo.update(Event(
+        id: existing!.id,
+        title: _titleController.text.trim(),
+        notes: notes.isEmpty ? null : notes,
+        schedule: schedule,
+        createdAt: existing.createdAt,
+        updatedAt: now,
+      ));
+    } else {
+      await repo.add(Event(
+        title: _titleController.text.trim(),
+        notes: notes.isEmpty ? null : notes,
+        schedule: schedule,
+        createdAt: now,
+        updatedAt: now,
+      ));
+    }
     if (mounted) Navigator.of(context).pop();
+  }
+
+  /// Deletes the event being edited and returns it to the caller so the list
+  /// can offer an undo. Only reachable when editing.
+  Future<void> _delete() async {
+    final existing = widget.event;
+    if (existing?.id == null) return;
+    await ref.read(eventRepositoryProvider).deleteById(existing!.id!);
+    if (mounted) Navigator.of(context).pop(EditorResult.deleted(existing));
   }
 
   @override
@@ -117,6 +188,14 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.event == null ? 'New event' : 'Edit event'),
+        actions: [
+          if (widget.event != null)
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              tooltip: 'Delete',
+              onPressed: _delete,
+            ),
+        ],
       ),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
