@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 
 import '../../domain/models/event.dart';
 import '../providers/event_list_provider.dart';
@@ -32,31 +33,51 @@ class _EventListScreenState extends ConsumerState<EventListScreen> {
         .where((r) => !_hidden.contains(r.event.id))
         .toList();
 
+    final theme = Theme.of(context);
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Schedule')),
-      body: async.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => Center(child: Text('Could not load events.\n$e')),
-        data: (_) => resolved.isEmpty
-            ? const EmptyState()
-            : ListView.builder(
-                padding: const EdgeInsets.only(top: 8, bottom: 96),
-                itemCount: resolved.length,
-                itemBuilder: (context, i) {
-                  final item = resolved[i];
-                  return Dismissible(
-                    key: ValueKey(item.event.id),
-                    direction: DismissDirection.endToStart,
-                    background: _deleteBackground(context),
-                    onDismissed: (_) => _deleteWithUndo(item.event),
-                    child: EventTile(
-                      resolved: item,
-                      today: today,
-                      onTap: () => _openEditor(item.event),
-                    ),
-                  );
-                },
-              ),
+      appBar: AppBar(
+        toolbarHeight: 76,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Schedule', style: theme.textTheme.headlineSmall),
+            Text(
+              DateFormat('EEEE, MMMM d').format(today),
+              style: theme.textTheme.bodyMedium
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          ],
+        ),
+      ),
+      body: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 250),
+        child: async.when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(child: Text('Could not load events.\n$e')),
+          data: (_) => resolved.isEmpty
+              ? const EmptyState(key: ValueKey('empty'))
+              : ListView.builder(
+                  key: const ValueKey('list'),
+                  padding: const EdgeInsets.only(top: 4, bottom: 96),
+                  itemCount: resolved.length,
+                  itemBuilder: (context, i) {
+                    final item = resolved[i];
+                    return Dismissible(
+                      key: ValueKey(item.event.id),
+                      direction: DismissDirection.endToStart,
+                      background: _deleteBackground(context),
+                      onDismissed: (_) => _deleteWithUndo(item.event),
+                      child: EventTile(
+                        resolved: item,
+                        today: today,
+                        onTap: () => _openEditor(item.event),
+                      ),
+                    );
+                  },
+                ),
+        ),
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => _openEditor(null),

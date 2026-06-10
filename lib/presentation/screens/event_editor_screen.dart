@@ -248,12 +248,12 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
             onChanged: (v) => setState(() => _includeTime = v),
           ),
           if (_includeTime)
-            WheelTimePicker(
+            _pickerCard(WheelTimePicker(
               initialTime: _time,
               onChanged: (t) => setState(() => _time = t),
-            ),
+            )),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 20),
           _NextPreview(text: _previewText(today), invalid: weeklyInvalid),
         ],
       ),
@@ -274,10 +274,10 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     if (_type == _EventType.oneTime) {
       return [
         _label('Date'),
-        WheelDatePicker(
+        _pickerCard(WheelDatePicker(
           initialDate: _date,
           onChanged: (d) => setState(() => _date = d),
-        ),
+        )),
       ];
     }
     return [
@@ -319,16 +319,16 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       case _RecurringKind.monthlyByDay:
         return [
           _label('Day of month'),
-          WheelPicker(
+          _pickerCard(WheelPicker(
             initialIndex: _dayOfMonth - 1,
             options: [for (var d = 1; d <= 31; d++) ordinal(d)],
             onSelected: (i) => setState(() => _dayOfMonth = i + 1),
-          ),
+          )),
         ];
       case _RecurringKind.monthlyByWeekday:
         return [
           _label('On the'),
-          SizedBox(
+          _pickerCard(SizedBox(
             height: 180,
             child: Row(
               children: [
@@ -357,10 +357,23 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
                 ),
               ],
             ),
-          ),
+          )),
         ];
     }
   }
+
+  Widget _pickerCard(Widget child) => Container(
+        margin: const EdgeInsets.only(top: 4),
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        decoration: BoxDecoration(
+          color: Theme.of(context)
+              .colorScheme
+              .surfaceContainerHighest
+              .withValues(alpha: 0.4),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: child,
+      );
 
   String _previewText(DateTime today) {
     final schedule = _buildSchedule();
@@ -387,22 +400,36 @@ class _NextPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final accent = invalid ? scheme.error : scheme.primary;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(12),
+        color: accent.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: accent.withValues(alpha: 0.22)),
       ),
-      child: Column(
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('NEXT', style: theme.textTheme.labelSmall),
-          const SizedBox(height: 4),
-          Text(
-            text,
-            style: theme.textTheme.titleMedium?.copyWith(
-              color: invalid ? theme.colorScheme.error : null,
+          Icon(invalid ? Icons.error_outline : Icons.event_available,
+              size: 20, color: accent),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('NEXT',
+                    style: theme.textTheme.labelSmall?.copyWith(color: accent)),
+                const SizedBox(height: 3),
+                Text(
+                  text,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    color: invalid ? scheme.error : scheme.onSurface,
+                  ),
+                ),
+              ],
             ),
           ),
         ],

@@ -26,16 +26,34 @@ class EventTile extends StatelessWidget {
     final event = resolved.event;
     final colors = UrgencyPalette.of(resolved.urgency, theme.brightness);
     final isRecurring = event.schedule is! OneTime;
+    final when = whenLabel(event.schedule, resolved.occurrence);
+    final relative = relativeLabel(resolved.occurrence, today);
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: Material(
-        color: colors.tint,
-        borderRadius: BorderRadius.circular(14),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: IntrinsicHeight(
+    return Semantics(
+      button: true,
+      label: '${event.title}, $when, $relative',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: theme.brightness == Brightness.light
+                ? [
+                    BoxShadow(
+                      color: colors.accent.withValues(alpha: 0.10),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Material(
+            color: colors.tint,
+            borderRadius: BorderRadius.circular(16),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: onTap,
+              child: IntrinsicHeight(
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -59,10 +77,7 @@ class EventTile extends StatelessWidget {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            _UrgencyChip(
-                              label: relativeLabel(resolved.occurrence, today),
-                              colors: colors,
-                            ),
+                            _UrgencyChip(label: relative, colors: colors),
                           ],
                         ),
                         const SizedBox(height: 4),
@@ -76,7 +91,7 @@ class EventTile extends StatelessWidget {
                             const SizedBox(width: 6),
                             Expanded(
                               child: Text(
-                                whenLabel(event.schedule, resolved.occurrence),
+                                when,
                                 style: theme.textTheme.bodyMedium?.copyWith(
                                   color: theme.colorScheme.onSurfaceVariant,
                                 ),
@@ -103,6 +118,8 @@ class EventTile extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+        ),
           ),
         ),
       ),
