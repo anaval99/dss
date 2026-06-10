@@ -1,28 +1,332 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 
 import '../../domain/models/event.dart';
+import '../../domain/models/schedule.dart';
+import '../../domain/recurrence/recurrence_engine.dart';
+import '../format/event_format.dart';
+import '../providers/repository_providers.dart';
+import '../providers/today_provider.dart';
+import '../widgets/pickers/wheel_date_picker.dart';
+import '../widgets/pickers/wheel_picker.dart';
+import '../widgets/pickers/wheel_time_picker.dart';
 
-/// Create/edit form. **Placeholder** — the wheel-picker editor is built in
-/// Phase 5. For now it exists so the FAB and (later) tap-to-edit have a
-/// destination and the app runs end-to-end.
-class EventEditorScreen extends StatelessWidget {
+enum _EventType { oneTime, recurring }
+
+enum _RecurringKind { weekly, monthlyByDay, monthlyByWeekday }
+
+const _weekdayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+/// Create form for all event types, using wheel "scroller" inputs and a live
+/// "Next: …" preview that runs the recurrence engine as the user scrolls.
+/// (Edit/prefill + delete land in Phase 6; [event] is accepted now for that.)
+class EventEditorScreen extends ConsumerStatefulWidget {
   const EventEditorScreen({super.key, this.event});
 
-  /// The event being edited, or `null` when creating a new one.
+  /// The event being edited, or `null` when creating.
   final Event? event;
 
   @override
+  ConsumerState<EventEditorScreen> createState() => _EventEditorScreenState();
+}
+
+class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
+  final _titleController = TextEditingController();
+  final _notesController = TextEditingController();
+
+  _EventType _type = _EventType.oneTime;
+  _RecurringKind _kind = _RecurringKind.weekly;
+
+  late DateTime _date;
+  late Set<int> _weekdays;
+  late int _dayOfMonth;
+  int _ordinal = 1;
+  late int _monthlyWeekday;
+
+  bool _includeTime = false;
+  TimeOfDay _time = const TimeOfDay(hour: 9, minute: 0);
+
+  bool _attemptedSave = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final today = ref.read(todayProvider);
+    _date = today;
+    _weekdays = {today.weekday};
+    _dayOfMonth = today.day;
+    _monthlyWeekday = today.weekday;
+  }
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _notesController.dispose();
+    super.dispose();
+  }
+
+  /// Builds the schedule from the current form state, or `null` if invalid
+  /// (only the empty-weekday case can produce null).
+  EventSchedule? _buildSchedule() {
+    final time = _includeTime ? _time : null;
+    if (_type == _EventType.oneTime) {
+      return OneTime(date: _date, time: time);
+    }
+    switch (_kind) {
+      case _RecurringKind.weekly:
+        if (_weekdays.isEmpty) return null;
+        return Weekly(weekdays: _weekdays, time: time);
+      case _RecurringKind.monthlyByDay:
+        return MonthlyByDay(dayOfMonth: _dayOfMonth, time: time);
+      case _RecurringKind.monthlyByWeekday:
+        return MonthlyByWeekday(
+          ordinal: _ordinal,
+          weekday: _monthlyWeekday,
+          time: time,
+        );
+    }
+  }
+
+  bool get _canSave =>
+      _titleController.text.trim().isNotEmpty && _buildSchedule() != null;
+
+  Future<void> _save() async {
+    setState(() => _attemptedSave = true);
+    final schedule = _buildSchedule();
+    if (_titleController.text.trim().isEmpty || schedule == null) return;
+
+    final now = ref.read(clockProvider)();
+    final notes = _notesController.text.trim();
+    await ref.read(eventRepositoryProvider).add(Event(
+          title: _titleController.text.trim(),
+          notes: notes.isEmpty ? null : notes,
+          schedule: schedule,
+          createdAt: now,
+          updatedAt: now,
+        ));
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final today = ref.watch(todayProvider);
+    final weeklyInvalid =
+        _type == _EventType.recurring && _kind == _RecurringKind.weekly && _weekdays.isEmpty;
+
     return Scaffold(
-      appBar: AppBar(title: Text(event == null ? 'New event' : 'Edit event')),
-      body: const Center(
+      appBar: AppBar(
+        title: Text(widget.event == null ? 'New event' : 'Edit event'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
+        children: [
+          TextField(
+            controller: _titleController,
+            autofocus: true,
+            textCapitalization: TextCapitalization.sentences,
+            decoration: InputDecoration(
+              labelText: 'Title',
+              border: const OutlineInputBorder(),
+              errorText: _attemptedSave && _titleController.text.trim().isEmpty
+                  ? 'A title is required'
+                  : null,
+            ),
+            onChanged: (_) => setState(() {}),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _notesController,
+            minLines: 1,
+            maxLines: 4,
+            textCapitalization: TextCapitalization.sentences,
+            decoration: const InputDecoration(
+              labelText: 'Notes (optional)',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          // Type: one-time vs recurring.
+          SegmentedButton<_EventType>(
+            segments: const [
+              ButtonSegment(value: _EventType.oneTime, label: Text('One-time')),
+              ButtonSegment(value: _EventType.recurring, label: Text('Recurring')),
+            ],
+            selected: {_type},
+            onSelectionChanged: (s) => setState(() => _type = s.first),
+          ),
+          const SizedBox(height: 16),
+
+          ..._buildScheduleSection(),
+
+          const SizedBox(height: 8),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Set a time'),
+            subtitle: Text(_includeTime ? formatTime(_time) : 'All-day'),
+            value: _includeTime,
+            onChanged: (v) => setState(() => _includeTime = v),
+          ),
+          if (_includeTime)
+            WheelTimePicker(
+              initialTime: _time,
+              onChanged: (t) => setState(() => _time = t),
+            ),
+
+          const SizedBox(height: 16),
+          _NextPreview(text: _previewText(today), invalid: weeklyInvalid),
+        ],
+      ),
+      bottomNavigationBar: SafeArea(
         child: Padding(
-          padding: EdgeInsets.all(32),
-          child: Text(
-            'The event editor (wheel pickers) arrives in Phase 5.',
-            textAlign: TextAlign.center,
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+          child: FilledButton.icon(
+            onPressed: _canSave ? _save : null,
+            icon: const Icon(Icons.check),
+            label: const Text('Save'),
           ),
         ),
+      ),
+    );
+  }
+
+  List<Widget> _buildScheduleSection() {
+    if (_type == _EventType.oneTime) {
+      return [
+        _label('Date'),
+        WheelDatePicker(
+          initialDate: _date,
+          onChanged: (d) => setState(() => _date = d),
+        ),
+      ];
+    }
+    return [
+      SegmentedButton<_RecurringKind>(
+        showSelectedIcon: false,
+        segments: const [
+          ButtonSegment(value: _RecurringKind.weekly, label: Text('Weekly')),
+          ButtonSegment(value: _RecurringKind.monthlyByDay, label: Text('Day')),
+          ButtonSegment(
+              value: _RecurringKind.monthlyByWeekday, label: Text('Weekday')),
+        ],
+        selected: {_kind},
+        onSelectionChanged: (s) => setState(() => _kind = s.first),
+      ),
+      const SizedBox(height: 16),
+      ..._buildRecurringPickers(),
+    ];
+  }
+
+  List<Widget> _buildRecurringPickers() {
+    switch (_kind) {
+      case _RecurringKind.weekly:
+        return [
+          _label('Repeat on'),
+          Wrap(
+            spacing: 8,
+            children: [
+              for (var d = 1; d <= 7; d++)
+                FilterChip(
+                  label: Text(_weekdayLabels[d - 1]),
+                  selected: _weekdays.contains(d),
+                  onSelected: (on) => setState(() {
+                    on ? _weekdays.add(d) : _weekdays.remove(d);
+                  }),
+                ),
+            ],
+          ),
+        ];
+      case _RecurringKind.monthlyByDay:
+        return [
+          _label('Day of month'),
+          WheelPicker(
+            initialIndex: _dayOfMonth - 1,
+            options: [for (var d = 1; d <= 31; d++) ordinal(d)],
+            onSelected: (i) => setState(() => _dayOfMonth = i + 1),
+          ),
+        ];
+      case _RecurringKind.monthlyByWeekday:
+        return [
+          _label('On the'),
+          SizedBox(
+            height: 180,
+            child: Row(
+              children: [
+                Expanded(
+                  child: WheelPicker(
+                    initialIndex: _ordinal - 1,
+                    options: const ['1st', '2nd', '3rd', '4th', 'last'],
+                    onSelected: (i) => setState(() => _ordinal = i + 1),
+                  ),
+                ),
+                Expanded(
+                  flex: 2,
+                  child: WheelPicker(
+                    initialIndex: _monthlyWeekday - 1,
+                    options: const [
+                      'Monday',
+                      'Tuesday',
+                      'Wednesday',
+                      'Thursday',
+                      'Friday',
+                      'Saturday',
+                      'Sunday',
+                    ],
+                    onSelected: (i) => setState(() => _monthlyWeekday = i + 1),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ];
+    }
+  }
+
+  String _previewText(DateTime today) {
+    final schedule = _buildSchedule();
+    if (schedule == null) return 'Pick at least one weekday';
+    final occ = nextOccurrence(schedule, today);
+    if (occ == null) return '—';
+    final dateStr = DateFormat('EEE, MMM d, y').format(occ);
+    final timeStr = _includeTime ? ' · ${formatTime(_time)}' : '';
+    return '$dateStr$timeStr  ·  ${relativeLabel(occ, today)}';
+  }
+
+  Widget _label(String text) => Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: Text(text, style: Theme.of(context).textTheme.labelLarge),
+      );
+}
+
+class _NextPreview extends StatelessWidget {
+  const _NextPreview({required this.text, required this.invalid});
+
+  final String text;
+  final bool invalid;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('NEXT', style: theme.textTheme.labelSmall),
+          const SizedBox(height: 4),
+          Text(
+            text,
+            style: theme.textTheme.titleMedium?.copyWith(
+              color: invalid ? theme.colorScheme.error : null,
+            ),
+          ),
+        ],
       ),
     );
   }
