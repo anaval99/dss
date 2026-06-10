@@ -116,15 +116,16 @@ void main() {
 
     await tester.tap(find.text('Recurring'));
     await tester.pumpAndSettle();
-    // Weekly is the default kind; the default selected weekday is "today"
-    // (Tuesday), so the schedule is already valid.
+    // No weekday is pre-selected; pick one to make the schedule valid.
+    await tester.tap(find.text('Mon'));
+    await tester.pumpAndSettle();
     await _tapSave(tester);
 
     expect(find.text('Standup'), findsOneWidget);
-    expect(find.textContaining('Every'), findsOneWidget);
+    expect(find.textContaining('Every Mon'), findsOneWidget);
   });
 
-  testWidgets('Save is blocked when a weekly event has no weekday',
+  testWidgets('a new weekly event has no weekday pre-selected (Save blocked)',
       (tester) async {
     await _pumpApp(tester);
     await _openEditor(tester);
@@ -132,9 +133,7 @@ void main() {
 
     await tester.tap(find.text('Recurring'));
     await tester.pumpAndSettle();
-    // Deselect the default weekday (Tuesday) → empty set → invalid.
-    await tester.tap(find.text('Tue'));
-    await tester.pumpAndSettle();
+    // Default weekday set is empty → schedule invalid, no tapping needed.
 
     final save = tester.widget<FilledButton>(
       find.widgetWithText(FilledButton, 'Save'),

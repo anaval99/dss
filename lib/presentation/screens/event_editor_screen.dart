@@ -65,7 +65,7 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     // Defaults for a new event (also the fallback for fields a given schedule
     // variant doesn't carry, so switching type/kind starts from sane values).
     _date = today;
-    _weekdays = {today.weekday};
+    _weekdays = {}; // no weekday pre-selected for a new weekly event
     _dayOfMonth = today.day;
     _monthlyWeekday = today.weekday;
 
