@@ -53,6 +53,19 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   drift_dev: ^2.33.0
   build_runner: ^2.15.0
+  flutter_launcher_icons: ^0.14.4
+
+# Launcher icon generation: `dart run flutter_launcher_icons`.
+# Android adaptive icon = navy background + the logo foreground (transparent
+# background so Android applies its own mask/shape). image_path is the legacy
+# (pre-Android 8) fallback, composited on the navy field.
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon/launcher_legacy.png"
+  adaptive_icon_background: "#173282"
+  adaptive_icon_foreground: "assets/icon/launcher_mark_scaled.png"
+  min_sdk_android: 21
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
